@@ -21,7 +21,7 @@
 
     class SmartList {
         constructor(element, user_config = {}) {
-            // Lấy element gốc (hỗ trợ string selector hoặc HTMLElement)
+            // get root element (support string selector or HTMLElement)
             if (typeof element === 'string') {
                 const nodes = document.querySelectorAll(element);
                 if (nodes.length > 1) return [...nodes].map(el => new SmartList(el, user_config));
@@ -31,7 +31,7 @@
             if (!root) throw new Error('SmartList: Cannot find element');
             if (root.SmartList) throw new Error('SmartList already initialized on this element');
 
-            // Gán instance vào element
+            // set instance to element
             root.SmartList = this;
             this.root = root;
 
@@ -63,20 +63,20 @@
                     parentDropdown: ''      // list sẽ đặt trong thẻ này
                 },
                 templates: {
-                    container: (data) => `<div class="${[data.class._container, data.class.container].filter(Boolean).join(' ')}"></div>`,
-                    head: (data) => `<div class="${[data.class._head, data.class.head].filter(Boolean).join(' ') }"></div>`,
-                    tags: (data) => `<div class="${[data.class._tags, data.class.tags].filter(Boolean).join(' ')}"></div>`,
+                    container: (data) => `<div class="${[data.class._container, data.class.container].filter(v => !!v).join(' ')}"></div>`,
+                    head: (data) => `<div class="${[data.class._head, data.class.head].filter(v => !!v).join(' ') }"></div>`,
+                    tags: (data) => `<div class="${[data.class._tags, data.class.tags].filter(v => !!v).join(' ')}"></div>`,
                     tag: (data) => `
-                        <div class="${[data.class._tag, data.class.tag].filter(Boolean).join(' ')}" data-id="${data.item.id}">
-                            <span class="${[data.class._tagLabel, data.class.tagLabel].filter(Boolean).join(' ')}">${data.item.label}</span>
-                            ${data.hasRemoveTag ? `<span class="${[data.class._tagRemove, data.class.tagRemove].filter(Boolean).join(' ')}">×</span>` : ''}
+                        <div class="${[data.class._tag, data.class.tag].filter(v => !!v).join(' ')}" data-id="${data.item.id}">
+                            <span class="${[data.class._tagLabel, data.class.tagLabel].filter(v => !!v).join(' ')}">${data.item.label}</span>
+                            ${data.hasRemoveTag ? `<span class="${[data.class._tagRemove, data.class.tagRemove].filter(v => !!v).join(' ')}">×</span>` : ''}
                         </div>`,
-                    control: (data) => `<div class="${[data.class._control, data.class.control].filter(Boolean).join(' ')}"></div>`,
-                    searchInput: (data) => `<input class="${[data.class._searchInput, data.class.searchInput].filter(Boolean).join(' ')}" type="text" placeholder="${data.placeholder}" />`,
-                    list: (data) => `<div class="${[data.class._list, data.class.list].filter(Boolean).join(' ')}" style="max-height: ${data.maxHeight};">`,
-                    items: (data) => `<div class="${[data.class._items, data.class.items].filter(Boolean).join(' ')}"></div>`,
-                    item: (data) => `<div class="${[data.class._item, data.class.item].filter(Boolean).join(' ')}" data-id="${data.item.id}">${data.item.label}</div>`,
-                    noResults: (data) => `<div class="${[data.class._item, data.class.item].filter(Boolean).join(' ')}">Không tìm thấy kết quả</div>`,
+                    control: (data) => `<div class="${[data.class._control, data.class.control].filter(v => !!v).join(' ')}"></div>`,
+                    searchInput: (data) => `<input class="${[data.class._searchInput, data.class.searchInput].filter(v => !!v).join(' ')}" type="text" placeholder="${data.placeholder}" />`,
+                    list: (data) => `<div class="${[data.class._list, data.class.list].filter(v => !!v).join(' ')}" style="max-height: ${data.maxHeight};">`,
+                    items: (data) => `<div class="${[data.class._items, data.class.items].filter(v => !!v).join(' ')}"></div>`,
+                    item: (data) => `<div class="${[data.class._item, data.class.item].filter(v => !!v).join(' ')}" data-id="${data.item.id}">${data.item.label}</div>`,
+                    noResults: (data) => `<div class="${[data.class._item, data.class.item].filter(v => !!v).join(' ')}">Không tìm thấy kết quả</div>`,
                 },
             };
 
@@ -91,10 +91,10 @@
             }
             this._events = {};          // store event callback
             this._domListeners = [];    // store DOM event listeners for cleanup
-            this._allItems = [];        // all items for search (when source is array or null)
+            this._allItems = [];        // all items for search (when source is array or data static)
 
             // Merge config: settings -> constant.attr_startWith -> user_config
-            this.settings = this._mergeSettings(root, user_config);
+            this._mergeSettings(root, user_config);
             this._initFeatures();
             this._initCallbacks();
             this._initTheme();
@@ -104,7 +104,7 @@
             this.focus_node = this.searchInput;
             this._bindEvents();
 
-            // TODO: dropdown luôn mở
+            // init dropdown đóng/mở
             if (this.state.isOpen) this.openDropdown();
             else {
                 this.state.isOpen = true;
@@ -151,16 +151,15 @@
                 const query = t.searchInput?.value?.trim() || '';
                 if (query) t._applySimpleFilter(query);
                 else st.items = new Map(itemsArray.map(item => [item.id, item]));
-
-                t.renderItems();
-                if (s.multiple) t.renderTags();
             }
 
             t.trigger('load');
+            t.renderItems();
+            t.renderTags();
             st.isLoading = false;
         }
 
-        // Filter đơn giản (fallback khi không có plugin fuzzySearch)
+        // Filter đơn giản (fallback khi không có plugin)
         _applySimpleFilter(query) {
             const t = this;
             if (!t._allItems || t._allItems.length === 0) return;
@@ -255,7 +254,7 @@
             root.removeAttribute('data-items');
             root.removeAttribute('data-selected');
 
-            return Object.assign({}, st, dataAttr, user_config);
+            t.settings = Object.assign({}, st, dataAttr, user_config);
         }
 
         _initFeatures() {
@@ -308,10 +307,10 @@
         }
 
         _initTheme() {
-            const s = this.settings;
-            const theme = s.theme || 'default';
-            const config = SmartList.themes[theme];
-            if (theme && typeof theme === 'object') Object.assign(s.class, config?.classMap);
+            let s = this.settings;
+            let theme = s.theme || 'default';
+            let config = SmartList.themes[theme];
+            if (config && typeof config === 'object') s.class = Object.assign(s.class, config.classMap);
         }
 
         _initTemplate() {
@@ -338,7 +337,7 @@
                             <div class="sl-tag"></div>
                             <div class="sl-tag"></div>
                         </div>
-		                <div class="sl-components">
+		                <div class="sl-control">
 			                <input class="sl-searchInput" type="input"/>
 			                <div class="sl-clear"></div>
 		                </div>
@@ -466,10 +465,15 @@
         }
 
         syncRoot() {
-            const t = this;
+            const t = this, s = t.state.selected;
             if (t.root?.tagName !== 'SELECT') return;
             t.root.replaceChildren();
-            t.state.selected.forEach(item => {
+            if (!t.settings.multiple && s.size > 1) {
+                const first = Array.from(s.entries())[0];
+                s.clear();
+                s.set(first[0], first[1]);
+            }
+            for (const item of s.values()) {
                 let option = t.root.querySelector(`option[value="${item.id}"]`);
                 if (!option) {
                     option = document.createElement('option');
@@ -478,14 +482,13 @@
                     t.root.appendChild(option);
                 }
                 option.selected = true;
-                if (!t.settings.multiple) return;
-            });
+            }
             t.root.dispatchEvent(new Event('change', { bubbles: true }));
         }
 
         toggleItem(item, resetUI = true) {
             const t = this;
-            const itemEl = t.settings.scope.querySelector(`.${t.settings.class.item}[data-id="${item.id}"]`);
+            const itemEl = t.settings.scope.querySelector(`.${t.settings.class._item}[data-id="${item.id}"]`);
             if (t.state.selected.has(item.id)) {
                 itemEl.classList.remove('selected');
                 t.removeItem(item.id);
@@ -522,12 +525,22 @@
         }
 
         renderTags() {
-            const t = this, d = t.settings;
-            if (!t.tags || !d.multiple) return;
+            const t = this, d = t.settings, s = t.state.selected;
+            // single select
+            if (!d.multiple) {
+                t.singleText?.remove();
+                const item = s.values().next().value;
+                if (item) {
+                    t.singleText = document.createTextNode(item.label);
+                    t.head.insertBefore(t.singleText, t.control);
+                }
+                return;
+            }
+            // multiple select
             t.tags.replaceChildren();
             let fragment = document.createDocumentFragment();
 
-            t.state.selected.forEach(item => {
+            s.forEach(item => {
                 const html = t._renderTemplate(d.templates.tag, { item });
                 const tagEl = t.getDom(html.trim());
                 if (tagEl) {
@@ -540,14 +553,13 @@
         }
 
         renderItems(append = false) {
-            const t = this;
-            const temps = t.settings.templates;
+            const t = this, temps = t.settings.templates, i = t.state.items;
             if (!t.items) return;
             if (!append) t.items.replaceChildren();
             let fragment = document.createDocumentFragment();
 
-            if (t.state.items.size === 0) fragment.appendChild(t.getDom(t._renderTemplate(temps.noResults).trim()));
-            else t.state.items.forEach(item => {
+            if (i.size === 0) fragment.appendChild(t.getDom(t._renderTemplate(temps.noResults).trim()));
+            else i.forEach(item => {
                 const html = t._renderTemplate(temps.item, { item });
                 const itemEl = t.getDom(html.trim());
                 if (itemEl) {
@@ -701,13 +713,13 @@
             events.split(/\s+/).forEach((event) => { callback(event); });
         }
 
-        // Helper add DOM EventListener
+        // add DOM EventListener
         _onDOM(element, event, handler, options = false) {
             element.addEventListener(event, handler, options);
             this._domListeners.push({ element, event, handler, options });
         }
 
-        // Helper xóa tất cả DOM listeners
+        // del all DOM listeners
         _offAllDOM() {
             this._domListeners.forEach(({ element, event, handler, options }) => {
                 if (element && handler) element.removeEventListener(event, handler, options);
