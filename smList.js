@@ -1,0 +1,732 @@
+﻿// SmartList v1.0 – Universal Data Renderer
+// Author: ducmanhchy@gmail.com
+
+; (function (g, f) {
+    typeof define == 'function' && define.amd
+        ? define(f)
+        : typeof module == 'object' && module.exports
+            ? module.exports = f()
+            : g.SmartList = f()
+})(this, function () {
+    'use strict';
+
+    const constant = {
+        attr_startWith: "data-sl-",
+        mode: {
+            paging: "paging",
+            infinity: "infinity",
+            auto: "auto"
+        }
+    }
+
+    class SmartList {
+        constructor(element, user_config = {}) {
+            // Lấy element gốc (hỗ trợ string selector hoặc HTMLElement)
+            if (typeof element === 'string') {
+                const nodes = document.querySelectorAll(element);
+                if (nodes.length > 1) return [...nodes].map(el => new SmartList(el, user_config));
+                element = nodes[0];
+            }
+            const root = this.getDom(element);
+            if (!root) throw new Error('SmartList: Cannot find element');
+            if (root.SmartList) throw new Error('SmartList already initialized on this element');
+
+            // Gán instance vào element
+            root.SmartList = this;
+            this.root = root;
+
+            this.settings = {
+                mode: constant.mode.auto,
+                source: null,
+                scope: document,
+                multiple: root.hasAttribute('multiple'),
+                closeDropdownOnSelect: false,
+                maxItemSelectable: -1,
+                placeholder: 'Tìm kiếm...',
+                maxHeight: '300px',
+                hasRemoveTag: true,
+                class: {
+                    _container: 'sl-ctn',
+                    _head: 'sl-head',
+                    _tags: 'sl-tags',
+                    _tag: 'sl-tag',
+                    _tagLabel: 'sl-tag-lb',
+                    _tagRemove: 'sl-tag-rm',
+                    _control: 'sl-ctrl',
+                    _searchInput: 'sl-sch',
+                    _list: 'sl-list',
+                    _items: 'sl-items',
+                    _item: 'sl-item',
+                },
+                render: {
+                    parentSearchInput: '',  // searchInput sẽ đặt trong thẻ này
+                    parentDropdown: ''      // list sẽ đặt trong thẻ này
+                },
+                templates: {
+                    container: (data) => `<div class="${[data.class._container, data.class.container].filter(Boolean).join(' ')}"></div>`,
+                    head: (data) => `<div class="${[data.class._head, data.class.head].filter(Boolean).join(' ') }"></div>`,
+                    tags: (data) => `<div class="${[data.class._tags, data.class.tags].filter(Boolean).join(' ')}"></div>`,
+                    tag: (data) => `
+                        <div class="${[data.class._tag, data.class.tag].filter(Boolean).join(' ')}" data-id="${data.item.id}">
+                            <span class="${[data.class._tagLabel, data.class.tagLabel].filter(Boolean).join(' ')}">${data.item.label}</span>
+                            ${data.hasRemoveTag ? `<span class="${[data.class._tagRemove, data.class.tagRemove].filter(Boolean).join(' ')}">×</span>` : ''}
+                        </div>`,
+                    control: (data) => `<div class="${[data.class._control, data.class.control].filter(Boolean).join(' ')}"></div>`,
+                    searchInput: (data) => `<input class="${[data.class._searchInput, data.class.searchInput].filter(Boolean).join(' ')}" type="text" placeholder="${data.placeholder}" />`,
+                    list: (data) => `<div class="${[data.class._list, data.class.list].filter(Boolean).join(' ')}" style="max-height: ${data.maxHeight};">`,
+                    items: (data) => `<div class="${[data.class._items, data.class.items].filter(Boolean).join(' ')}"></div>`,
+                    item: (data) => `<div class="${[data.class._item, data.class.item].filter(Boolean).join(' ')}" data-id="${data.item.id}">${data.item.label}</div>`,
+                    noResults: (data) => `<div class="${[data.class._item, data.class.item].filter(Boolean).join(' ')}">Không tìm thấy kết quả</div>`,
+                },
+            };
+
+            // Setup state
+            this.state = {
+                staticItems: new Map(), // Map <id, item> – data static của root
+                items: new Map(),       // Map <id, item> – tất cả data đã load
+                selected: new Map(),    // Map <id, item> – items đang được chọn
+                isOpen: false,          // State of dropdown
+                debugger: true,
+                isLoading: false,       // Trạng thái đang load
+            }
+            this._events = {};          // store event callback
+            this._domListeners = [];    // store DOM event listeners for cleanup
+            this._allItems = [];        // all items for search (when source is array or null)
+
+            // Merge config: settings -> constant.attr_startWith -> user_config
+            this.settings = this._mergeSettings(root, user_config);
+            this._initFeatures();
+            this._initCallbacks();
+            this._initTheme();
+            this._initTemplate();
+
+            // Bind events
+            this.focus_node = this.searchInput;
+            this._bindEvents();
+
+            // TODO: dropdown luôn mở
+            if (this.state.isOpen) this.openDropdown();
+            else {
+                this.state.isOpen = true;
+                this.closeDropdown();
+            }
+            this.load();
+            this.syncRoot();
+
+            // Auto destroy khi không cần (document không chứa this.root - ex: redirect page)
+            this._mutationObserver = new MutationObserver((mutations) => {
+                for (const m of mutations) {
+                    if (!document.contains(this.root)) {
+                        this.destroy();
+                        break;
+                    }
+                }
+            });
+            this._mutationObserver.observe(document.body, { childList: true, subtree: true });
+        }
+
+        async load() {
+            const t = this, s = t.settings, sc = s.source, st = t.state;
+            if (st.isLoading) return;
+            st.isLoading = true;
+
+            // source là array
+            const isArraySource = Array.isArray(sc);
+            const isStaticSource = !sc && st.staticItems && st.staticItems.size > 0;
+            if (isArraySource || isStaticSource) {
+                // Lấy tất cả items gốc
+                const itemsArray = Array.isArray(sc)
+                    ? sc.map(entry => {
+                        const item = typeof entry === 'object' && entry !== null && entry.id !== undefined
+                            ? { id: entry.id, label: entry.label || entry.name || entry.id, ...entry }
+                            : { id: String(entry), label: String(entry) };
+                        return item;
+                    })
+                    : Array.from(st.staticItems.values());
+
+                // Lưu items gốc để dùng cho filter
+                t._allItems = itemsArray;
+
+                // Áp dụng filter đơn giản nếu có searchInput value
+                const query = t.searchInput?.value?.trim() || '';
+                if (query) t._applySimpleFilter(query);
+                else st.items = new Map(itemsArray.map(item => [item.id, item]));
+
+                t.renderItems();
+                if (s.multiple) t.renderTags();
+            }
+
+            t.trigger('load');
+            st.isLoading = false;
+        }
+
+        // Filter đơn giản (fallback khi không có plugin fuzzySearch)
+        _applySimpleFilter(query) {
+            const t = this;
+            if (!t._allItems || t._allItems.length === 0) return;
+            
+            const lowerQuery = query.toLowerCase();
+            const filtered = t._allItems.filter(item => {
+                const label = (item.label || item.name || String(item.id) || '').toLowerCase();
+                return label.includes(lowerQuery);
+            });
+            t.state.items = new Map(filtered.map(item => [item.id, item]));
+        }
+
+        // merge config user_config -> data-attr -> default
+        _mergeSettings(root, user_config) {
+            const t = this, s = t.state, sl = t.state.selected, st = t.settings, dataAttr = {};
+            for (const attr of root.attributes) {
+                if (attr.name.startsWith(constant.attr_startWith)) {
+                    const key = attr.name.replace(constant.attr_startWith, '').replace(/-([a-z])/g, g => g[1].toUpperCase());
+                    try { dataAttr[key] = JSON.parse(attr.value); }
+                    catch { dataAttr[key] = attr.value; }
+                }
+            }
+            if (!st.multiple) st.maxItemSelectable = 1;
+            t.rtl = /rtl/i.test(getComputedStyle(root).direction);
+            t.isRequired = root.required;
+            t.tabIndex = root.tabIndex || 0;
+
+            const _loadDataFromRoot = () => {
+                const tagName = root.tagName.toLowerCase();
+                const parseDataString = (str) => {
+                    if (!str) return [];
+                    try {
+                        const parsed = JSON.parse(str);
+                        return Array.isArray(parsed) ? parsed : [];
+                    } catch (e) {
+                        if (s.debugger) console.log('Data error. Wrong format json!');
+                        return str.split(/[\n,;]+/).map(v => v.trim()).filter(v => v);
+                    }
+                };
+
+                // attr selected
+                const selected = root.dataset.selected;
+                const selectedIds = parseDataString(selected).map(v => typeof v === 'object' && v.id !== undefined ? v.id : String(v));
+                selectedIds.forEach(id => sl.set(id, { id }));
+
+                const _loadDataFromVal = (str) => {
+                    if (!str) return;
+                    let data = parseDataString(str);
+
+                    data.forEach(entry => {
+                        const item = typeof entry === 'object' && entry !== null && entry.id !== undefined
+                            ? { id: entry.id, label: entry.label || entry.name || entry.id, ...entry }
+                            : { id: String(entry), label: String(entry) };
+
+                        s.staticItems.set(item.id, item);
+                        if (selectedIds.includes(item.id)) sl.set(item.id, item);
+                    });
+                }
+
+                const _loadDataFromSelect = (select) => {
+                    select.querySelectorAll('option').forEach(opt => {
+                        if (opt.disabled) return;
+
+                        const value = opt.value;
+                        const label = opt.textContent.trim() || value;
+
+                        const item = { id: value, label };
+
+                        // Lưu vào items
+                        s.staticItems.set(value, item);
+
+                        // Nếu được chọn → thêm vào selected
+                        if (opt.hasAttribute('selected') || opt.selected || selectedIds.includes(item.id)) sl.set(value, item);
+                    });
+                }
+
+                // attr items
+                const dataAttrItems = root.dataset.items || '';
+                let hasAttrItems = false;
+                if (dataAttrItems) {
+                    hasAttrItems = true;
+                    _loadDataFromVal(dataAttrItems);
+                }
+
+                // option/value
+                if (!hasAttrItems) {
+                    if (tagName === 'select') _loadDataFromSelect(root);
+                    else if (tagName === 'input') _loadDataFromVal(root.value.trim());
+                }
+            }
+            _loadDataFromRoot();
+            root.removeAttribute('data-items');
+            root.removeAttribute('data-selected');
+
+            return Object.assign({}, st, dataAttr, user_config);
+        }
+
+        _initFeatures() {
+            const plugins = this.settings.plugins || [];
+            const enabled = {};
+
+            if (Array.isArray(plugins)) {
+                plugins.forEach(item => {
+                    // ['a', 'b', 'c']
+                    if (typeof item === 'string') enabled[item] = true;
+                    // [{'name': 'a', options: {}}, {'name': 'b', options: {}}]
+                    else if (item && item.name) enabled[item.name] = item.options || true;
+                });
+            }
+            // {'a': { ... }, 'b': { ... }, 'c': { ... }}
+            else if (plugins && typeof plugins === 'object') Object.assign(enabled, plugins);
+
+            // Duyệt và chạy các plugin được bật
+            for (const name in enabled) {
+                if (enabled[name] === false) continue;
+
+                const constructor = SmartList.plugins[name];
+                if (!constructor) {
+                    console.warn(`SmartList: Plugin "${name}" không tồn tại.`); continue;
+                }
+
+                // Gọi plugin – this chính là instance, options là config
+                constructor.call(this, enabled[name]);
+            }
+        }
+
+        _initCallbacks() {
+            let key, fn;
+            let callbacks = {
+                'init': 'onInit',
+                'load': 'onLoad',
+                'load_error': 'onLoadError',
+                'item_add': 'onItemAdd',
+                'item_remove': 'onItemRemove',
+                'render_tags': 'onRenderTags',
+                'render_items': 'onRenderItems',
+                'dropdown_open': 'onDropdownOpen',
+                'dropdown_close': 'onDropdownClose',
+                'destroy': 'onDestroy',
+            };
+            for (key in callbacks) {
+                fn = this.settings[callbacks[key]];
+                if (fn) this.on(key, fn);
+            }
+        }
+
+        _initTheme() {
+            const s = this.settings;
+            const theme = s.theme || 'default';
+            const config = SmartList.themes[theme];
+            if (theme && typeof theme === 'object') Object.assign(s.class, config?.classMap);
+        }
+
+        _initTemplate() {
+            const t = this, s = t.settings, cls = s.class, temps = s.templates;
+
+            // Render từng phần riêng biệt
+            this.container = t.getDom(t._renderTemplate(temps.container, cls));
+            this.head = t.getDom(t._renderTemplate(temps.head, cls));
+            this.tags = t.getDom(t._renderTemplate(temps.tags, cls));
+            this.control = t.getDom(t._renderTemplate(temps.control, cls));
+            this.searchInput = t.getDom(t._renderTemplate(temps.searchInput, cls));
+            this.list = t.getDom(t._renderTemplate(temps.list, cls));
+            this.items = t.getDom(t._renderTemplate(temps.items, cls));
+
+            const _setupDOMTemplate = () => {
+                const t = this;
+                const r = s.render;
+
+                // Xây dựng cây DOM
+                /**
+                <div class="sl-container">
+                    <div class="sl-head">
+                        <div class="sl-tags">
+                            <div class="sl-tag"></div>
+                            <div class="sl-tag"></div>
+                        </div>
+		                <div class="sl-components">
+			                <input class="sl-searchInput" type="input"/>
+			                <div class="sl-clear"></div>
+		                </div>
+                    </div>
+                    <div class="sl-list">
+                        <div class="sl-items">
+                            <div class="sl-item"></div>
+                            <div class="sl-item"></div>
+                        </div>
+                    </div>
+                </div>
+                 */
+                this.container.appendChild(t.head);
+                if (s.multiple) this.head.appendChild(t.tags);
+                this.head.appendChild(t.control);
+                t.getDom(r.parentSearchInput || t.control).appendChild(t.searchInput);
+                t.getDom(r.parentDropdown || t.container).appendChild(t.list);
+                this.list.appendChild(t.items);
+
+                // Chèn container vào trang
+                t.root.style.display = 'none';
+                t.root.parentNode.insertBefore(t.container, t.root.nextSibling);
+            }
+            _setupDOMTemplate();
+        }
+
+        _bindEvents() {
+            const t = this, s = t.state, d = t.settings, cls = d.class;
+            const _bindHover = (container, selector) => {
+                let hoverEl = null;
+                this._onDOM(container, 'mousemove', e => {
+                    const el = e.target.closest(selector);
+                    if (!el || el === hoverEl) return;
+                    hoverEl?.classList.remove('hover');
+                    el.classList.add('hover');
+                    hoverEl = el;
+                });
+                this._onDOM(container, 'mouseleave', () => {
+                    hoverEl?.classList.remove('hover');
+                    hoverEl = null;
+                });
+            }
+            t._setHoverItem = (index) => {
+                const items = t.items.children;
+                const prev = s.hoverItem;
+                if (prev) prev.classList.remove('hover');
+
+                const item = items[index];
+                if (!item) return;
+
+                item.classList.add('hover');
+                s.hoverIndex = index;
+                s.hoverItem = item;
+
+                // auto scroll into view
+                item.scrollIntoView({ block: 'nearest' });
+            }
+            t._resetHoverItem = () => {
+                s.hoverItem?.classList.remove('hover');
+                s.hoverItem = null;
+                s.hoverIndex = -1;
+            }
+
+            /**
+            event level:
+            in: mousedown → focus (input) → mouseup → click
+            out: mousedown → blur (input) → focus (element khác) → mouseup → click
+             */
+            // click outside container or list (list not inside container)
+            t._onDOM(document, 'mousedown', (e) => {
+                if (!t.container.contains(e.target) && !t.list.contains(e.target)) t.closeDropdown();
+            });
+
+            if (d.multiple) {
+                // hover tag
+                _bindHover(t.tags, `.${cls._tag}`);
+                // click tag
+                t._onDOM(t.tags, 'mousedown', (e) => {
+                    const rm = e.target.closest(`.${cls._tagRemove}`);
+                    const tag = e.target.closest(`.${cls._tag}`);
+                    if (!tag?.dataset.id) return;
+                    // remove tag
+                    if (rm) t.toggleItem(s.items.get(tag.dataset.id));
+                    else tag.classList.toggle('selected');
+                });
+            }
+
+            // hover item
+            t._onDOM(t.items, 'mousemove', e => {
+                const item = e.target.closest(`.${cls._item}`);
+                if (!item) {
+                    t._resetHoverItem(); return;
+                }
+
+                const idx = [...t.items.children].indexOf(item);
+                if (idx !== t.state.hoverIndex) t._setHoverItem(idx);
+            });
+            // click item
+            t._onDOM(t.items, 'mousedown', (e) => {
+                const itemEl = e.target.closest(`.${cls._item}`);
+                if (!itemEl?.dataset.id) return;
+
+                const item = s.items.get(itemEl.dataset.id);
+                if (!item) return;
+
+                t.toggleItem(item);
+                // chặn active onBlur()
+                if (!d.closeDropdownOnSelect) e.preventDefault();
+            });
+
+            t._onDOM(t.searchInput, 'input', (e) => t.onInput(e));
+            t._onDOM(t.focus_node, 'click', (e) => t.onClick(e));
+            t._onDOM(t.focus_node, 'focus', (e) => t.onFocus(e));
+            t._onDOM(t.focus_node, 'blur', (e) => t.onBlur(e));
+
+            t.onInput = (e) => {
+                t.load();
+                t.openDropdown();
+            }
+            t.onClick = (e) => t.openDropdown();
+            t.onFocus = (e) => t.openDropdown();
+            t.onBlur = (e) => t.closeDropdown();
+
+            t.trigger('init');
+        }
+
+        syncRoot() {
+            const t = this;
+            if (t.root?.tagName !== 'SELECT') return;
+            t.root.replaceChildren();
+            t.state.selected.forEach(item => {
+                let option = t.root.querySelector(`option[value="${item.id}"]`);
+                if (!option) {
+                    option = document.createElement('option');
+                    option.value = item.id;
+                    option.textContent = item.label;
+                    t.root.appendChild(option);
+                }
+                option.selected = true;
+                if (!t.settings.multiple) return;
+            });
+            t.root.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        toggleItem(item, resetUI = true) {
+            const t = this;
+            const itemEl = t.settings.scope.querySelector(`.${t.settings.class.item}[data-id="${item.id}"]`);
+            if (t.state.selected.has(item.id)) {
+                itemEl.classList.remove('selected');
+                t.removeItem(item.id);
+            }
+            else {
+                itemEl.classList.add('selected');
+                t.addItem(item);
+            }
+            if (resetUI) {
+                t.renderTags();
+                t.syncRoot();
+            }
+        }
+
+        // add item selected
+        addItem(item) {
+            const t = this, s = t.state.selected, d = t.settings, max = d.maxItemSelectable;
+
+            if (!d.multiple) s.clear();
+            if (max > 0 && s.size >= max) return false;
+
+            s.set(item.id, item);
+            t.trigger('item_add', item.id, item);
+        }
+
+        // remove item selected
+        removeItem(id) {
+            const s = this.state.selected;
+            const item = s.get(id);
+            if (!item) return false;
+
+            s.delete(id);
+            this.trigger('item_remove', id, item);
+        }
+
+        renderTags() {
+            const t = this, d = t.settings;
+            if (!t.tags || !d.multiple) return;
+            t.tags.replaceChildren();
+            let fragment = document.createDocumentFragment();
+
+            t.state.selected.forEach(item => {
+                const html = t._renderTemplate(d.templates.tag, { item });
+                const tagEl = t.getDom(html.trim());
+                if (tagEl) {
+                    tagEl.dataset.id = item.id;
+                    fragment.appendChild(tagEl);
+                }
+            });
+            t.tags.appendChild(fragment);
+            t.trigger('render_tags');
+        }
+
+        renderItems(append = false) {
+            const t = this;
+            const temps = t.settings.templates;
+            if (!t.items) return;
+            if (!append) t.items.replaceChildren();
+            let fragment = document.createDocumentFragment();
+
+            if (t.state.items.size === 0) fragment.appendChild(t.getDom(t._renderTemplate(temps.noResults).trim()));
+            else t.state.items.forEach(item => {
+                const html = t._renderTemplate(temps.item, { item });
+                const itemEl = t.getDom(html.trim());
+                if (itemEl) {
+                    itemEl.dataset.id = item.id;
+                    if (t.state.selected.has(item.id)) itemEl.classList.add('selected');
+                    fragment.appendChild(itemEl);
+                }
+            });
+
+            t.items.appendChild(fragment);
+            t.trigger('render_items');
+        }
+
+        openDropdown(delay = 300) {
+            const t = this;
+            if (t.state.isOpen) return;
+            t.state.isOpen = true;
+            if (t._openTimeout) clearTimeout(t._openTimeout);
+            t._openTimeout = setTimeout(() => { t.list.style.display = 'block'; }, delay);
+            t.trigger('dropdown_open');
+        }
+
+        closeDropdown() {
+            const t = this;
+            if (!t.state.isOpen) return;
+            t.state.isOpen = false;
+            if (t._openTimeout) clearTimeout(t._openTimeout);
+            t.list.style.display = 'none';
+            t._resetHoverItem();
+            t.trigger('dropdown_close');
+        }
+
+        // render template context
+        _renderTemplate(template, context = {}) {
+            if (typeof template === 'function') return template.call(this, { ...this.settings, ...context });
+            return template || ''; // nếu là string
+        }
+
+        // return HTMLElement
+        getDom(arg) {
+            if (!arg) return null;
+            if (arg instanceof Element) return arg;
+            if (typeof arg === 'string') {
+                if (arg[0] === '<') {
+                    const t = document.createElement('template');
+                    t.innerHTML = arg.trim();
+                    return t.content.firstChild;
+                }
+                return document.querySelector(arg);
+            }
+        }
+
+        destroy() {
+            const t = this;
+            
+            // Ngăn destroy nhiều lần
+            if (t._destroyed) return;
+            t._destroyed = true;
+
+            // Trigger destroy event trước khi cleanup
+            t.trigger('destroy');
+
+            // Ngắt kết nối MutationObserver
+            if (t._mutationObserver) {
+                t._mutationObserver.disconnect();
+                t._mutationObserver = null;
+            }
+
+            // Xóa timeouts
+            if (t._openTimeout) {
+                clearTimeout(t._openTimeout);
+                t._openTimeout = null;
+            }
+
+            // Xóa tất cả DOM event listeners
+            t._offAllDOM();
+
+            // Xóa DOM elements được tạo
+            if (t.container && t.container.parentNode) {
+                t.container.parentNode.removeChild(t.container);
+            }
+
+            // Khôi phục hiển thị của root element nếu đã ẩn
+            if (t.root) {
+                t.root.style.display = '';
+                // Xóa reference SmartList từ root element
+                delete t.root.SmartList;
+            }
+
+            // Xóa tất cả event callbacks
+            t._events = {};
+
+            // Xóa allItems
+            t._allItems = [];
+
+            // Xóa state
+            if (t.state) {
+                if (t.state.staticItems) t.state.staticItems.clear();
+                if (t.state.items) t.state.items.clear();
+                if (t.state.selected) t.state.selected.clear();
+                t.state = null;
+            }
+
+            // Xóa references
+            t.container = null;
+            t.head = null;
+            t.tags = null;
+            t.control = null;
+            t.searchInput = null;
+            t.list = null;
+            t.items = null;
+            t.focus_node = null;
+            t.root = null;
+        }
+
+        on(events, fct) {
+            this._forEvents(events, (event) => {
+                const fcts = this._events[event] || [];
+                fcts.push(fct);
+                this._events[event] = fcts;
+            });
+        }
+
+        off(events, fct) {
+            var n = arguments.length;
+            if (n === 0) {
+                this._events = {};
+                return;
+            }
+            this._forEvents(events, (event) => {
+                if (n === 1) {
+                    delete this._events[event];
+                    return;
+                }
+                const fcts = this._events[event];
+                if (fcts === undefined) return;
+                fcts.splice(fcts.indexOf(fct), 1);
+                this._events[event] = fcts;
+            });
+        }
+
+        trigger(events, ...args) {
+            this._forEvents(events, (event) => {
+                const fcts = this._events[event];
+                if (fcts === undefined) return;
+                fcts.forEach(fct => { fct.apply(this, args); });
+            });
+        }
+
+        _forEvents(events, callback) {
+            events.split(/\s+/).forEach((event) => { callback(event); });
+        }
+
+        // Helper add DOM EventListener
+        _onDOM(element, event, handler, options = false) {
+            element.addEventListener(event, handler, options);
+            this._domListeners.push({ element, event, handler, options });
+        }
+
+        // Helper xóa tất cả DOM listeners
+        _offAllDOM() {
+            this._domListeners.forEach(({ element, event, handler, options }) => {
+                if (element && handler) element.removeEventListener(event, handler, options);
+            });
+            this._domListeners = [];
+        }
+    }
+
+    SmartList.themes = {};
+    SmartList.theme = function (name, config) {
+        SmartList.themes[name] = config;
+    };
+
+    SmartList.plugins = {};
+    SmartList.plugin = function (name, constructor) {
+        if (typeof name !== 'string' || name === '') throw new Error('SmartList: Plugin name must be a non-empty string');
+        if (typeof constructor !== 'function') throw new Error('SmartList: Plugin constructor must be a function');
+        SmartList.plugins[name] = constructor;
+    };
+
+    return SmartList;
+});
