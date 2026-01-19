@@ -1,4 +1,4 @@
-﻿// SmartList v1.0 – Universal Data Renderer
+﻿// SmartList v1.1 – Universal Data Renderer
 // Author: ducmanhchy@gmail.com
 
 ; (function (g, f) {
@@ -45,6 +45,8 @@
                 placeholder: 'Tìm kiếm...',
                 maxHeight: '300px',
                 hasRemoveTag: true,
+                idField: 'id',      // id from datasource
+                labelField: 'name', // label from datasource
                 class: {
                     _container: 'sl-ctn',
                     _head: 'sl-head',
@@ -137,19 +139,16 @@
                 // Lấy tất cả items gốc
                 const itemsArray = Array.isArray(sc)
                     ? sc.map(entry => {
-                        const item = typeof entry === 'object' && entry !== null && entry.id !== undefined
-                            ? { id: entry.id, label: entry.label || entry.name || entry.id, ...entry }
+                        const item = typeof entry === 'object' && entry !== null && entry[s.idField] !== undefined
+                            ? { id: entry[s.idField], label: entry[s.labelField] || entry[s.idField], ...entry }
                             : { id: String(entry), label: String(entry) };
                         return item;
                     })
                     : Array.from(st.staticItems.values());
 
-                // Lưu items gốc để dùng cho filter
-                t._allItems = itemsArray;
-
                 // Áp dụng filter đơn giản nếu có searchInput value
                 const query = t.searchInput?.value?.trim() || '';
-                if (query) t._applySimpleFilter(query);
+                if (query) t._applySimpleFilter(itemsArray, query);
                 else st.items = new Map(itemsArray.map(item => [item.id, item]));
             }
 
@@ -160,26 +159,26 @@
         }
 
         // Filter đơn giản (fallback khi không có plugin)
-        _applySimpleFilter(query) {
+        _applySimpleFilter(items, query) {
             const t = this;
-            if (!t._allItems || t._allItems.length === 0) return;
+            if (!items || items.length === 0) return;
             
             const lowerQuery = query.toLowerCase();
-            const filtered = t._allItems.filter(item => {
-                const label = (item.label || item.name || String(item.id) || '').toLowerCase();
-                return label.includes(lowerQuery);
+            const filtered = items.filter(item => {
+                return item.label.toLowerCase().includes(lowerQuery);
             });
             t.state.items = new Map(filtered.map(item => [item.id, item]));
         }
 
         // merge config user_config -> data-attr -> default
         _mergeSettings(root, user_config) {
-            const t = this, s = t.state, sl = t.state.selected, st = t.settings, dataAttr = {};
+            const t = this, s = t.state, sl = t.state.selected, st = t.settings, data_attr = {};
+
             for (const attr of root.attributes) {
                 if (attr.name.startsWith(constant.attr_startWith)) {
                     const key = attr.name.replace(constant.attr_startWith, '').replace(/-([a-z])/g, g => g[1].toUpperCase());
-                    try { dataAttr[key] = JSON.parse(attr.value); }
-                    catch { dataAttr[key] = attr.value; }
+                    try { data_attr[key] = JSON.parse(attr.value); }
+                    catch { data_attr[key] = attr.value; }
                 }
             }
             if (!st.multiple) st.maxItemSelectable = 1;
@@ -201,21 +200,21 @@
                 };
 
                 // attr selected
-                const selected = root.dataset.selected;
-                const selectedIds = parseDataString(selected).map(v => typeof v === 'object' && v.id !== undefined ? v.id : String(v));
-                selectedIds.forEach(id => sl.set(id, { id }));
+                const selectedIds = parseDataString(root.dataset.selected).map(v => typeof v === 'object' && v[st.idField] !== undefined ? v[st.idField] : String(v));
+                if (!st.multiple && selectedIds.length) sl.set(selectedIds[0], { id: selectedIds[0], label: selectedIds[0] });
+                else selectedIds.forEach(id => sl.set(id, { id, label: id }));
 
                 const _loadDataFromVal = (str) => {
                     if (!str) return;
                     let data = parseDataString(str);
 
                     data.forEach(entry => {
-                        const item = typeof entry === 'object' && entry !== null && entry.id !== undefined
-                            ? { id: entry.id, label: entry.label || entry.name || entry.id, ...entry }
+                        const item = typeof entry === 'object' && entry !== null && entry[st.idField] !== undefined
+                            ? { id: entry[st.idField], label: entry[st.labelField] || entry[st.idField], ...entry }
                             : { id: String(entry), label: String(entry) };
 
                         s.staticItems.set(item.id, item);
-                        if (selectedIds.includes(item.id)) sl.set(item.id, item);
+                        if (sl.has(item.id)) sl.set(item.id, item);
                     });
                 }
 
@@ -223,16 +222,14 @@
                     select.querySelectorAll('option').forEach(opt => {
                         if (opt.disabled) return;
 
-                        const value = opt.value;
-                        const label = opt.textContent.trim() || value;
-
-                        const item = { id: value, label };
+                        const id = opt.value;
+                        const item = { id: id, label: opt.textContent.trim() || id };
 
                         // Lưu vào items
-                        s.staticItems.set(value, item);
+                        s.staticItems.set(id, item);
 
                         // Nếu được chọn → thêm vào selected
-                        if (opt.hasAttribute('selected') || opt.selected || selectedIds.includes(item.id)) sl.set(value, item);
+                        if (((opt.hasAttribute('selected') || opt.selected) && !sl.length) || sl.has(item.id)) sl.set(id, item);
                     });
                 }
 
@@ -254,7 +251,7 @@
             root.removeAttribute('data-items');
             root.removeAttribute('data-selected');
 
-            t.settings = Object.assign({}, st, dataAttr, user_config);
+            t.settings = Object.assign({}, st, data_attr, user_config);
         }
 
         _initFeatures() {
@@ -314,19 +311,18 @@
         }
 
         _initTemplate() {
-            const t = this, s = t.settings, cls = s.class, temps = s.templates;
+            let t = this, s = t.settings, cls = s.class, temps = s.templates;
 
             // Render từng phần riêng biệt
-            this.container = t.getDom(t._renderTemplate(temps.container, cls));
-            this.head = t.getDom(t._renderTemplate(temps.head, cls));
-            this.tags = t.getDom(t._renderTemplate(temps.tags, cls));
-            this.control = t.getDom(t._renderTemplate(temps.control, cls));
-            this.searchInput = t.getDom(t._renderTemplate(temps.searchInput, cls));
-            this.list = t.getDom(t._renderTemplate(temps.list, cls));
-            this.items = t.getDom(t._renderTemplate(temps.items, cls));
+            t.container = t.getDom(t._renderTemplate(temps.container, cls));
+            t.head = t.getDom(t._renderTemplate(temps.head, cls));
+            t.tags = t.getDom(t._renderTemplate(temps.tags, cls));
+            t.control = t.getDom(t._renderTemplate(temps.control, cls));
+            t.searchInput = t.getDom(t._renderTemplate(temps.searchInput, cls));
+            t.list = t.getDom(t._renderTemplate(temps.list, cls));
+            t.items = t.getDom(t._renderTemplate(temps.items, cls));
 
             const _setupDOMTemplate = () => {
-                const t = this;
                 const r = s.render;
 
                 // Xây dựng cây DOM
@@ -350,12 +346,12 @@
                     </div>
                 </div>
                  */
-                this.container.appendChild(t.head);
-                if (s.multiple) this.head.appendChild(t.tags);
-                this.head.appendChild(t.control);
+                t.container.appendChild(t.head);
+                if (s.multiple) t.head.appendChild(t.tags);
+                t.head.appendChild(t.control);
                 t.getDom(r.parentSearchInput || t.control).appendChild(t.searchInput);
                 t.getDom(r.parentDropdown || t.container).appendChild(t.list);
-                this.list.appendChild(t.items);
+                t.list.appendChild(t.items);
 
                 // Chèn container vào trang
                 t.root.style.display = 'none';
@@ -468,27 +464,20 @@
             const t = this, s = t.state.selected;
             if (t.root?.tagName !== 'SELECT') return;
             t.root.replaceChildren();
-            if (!t.settings.multiple && s.size > 1) {
-                const first = Array.from(s.entries())[0];
-                s.clear();
-                s.set(first[0], first[1]);
-            }
             for (const item of s.values()) {
-                let option = t.root.querySelector(`option[value="${item.id}"]`);
-                if (!option) {
-                    option = document.createElement('option');
-                    option.value = item.id;
-                    option.textContent = item.label;
-                    t.root.appendChild(option);
-                }
+                let option = document.createElement('option');
+                option.value = item.id;
+                option.textContent = item.label;
                 option.selected = true;
+                t.root.appendChild(option);
             }
             t.root.dispatchEvent(new Event('change', { bubbles: true }));
         }
 
         toggleItem(item, resetUI = true) {
             const t = this;
-            const itemEl = t.settings.scope.querySelector(`.${t.settings.class._item}[data-id="${item.id}"]`);
+            const itemEl = t.items.querySelector(`[data-id="${item.id}"]`);
+            if (!t.settings.multiple) t.items.querySelectorAll('.selected').forEach(el => el.classList.remove('selected'));
             if (t.state.selected.has(item.id)) {
                 itemEl.classList.remove('selected');
                 t.removeItem(item.id);
@@ -541,8 +530,7 @@
             let fragment = document.createDocumentFragment();
 
             s.forEach(item => {
-                const html = t._renderTemplate(d.templates.tag, { item });
-                const tagEl = t.getDom(html.trim());
+                const tagEl = t.getDom(t._renderTemplate(d.templates.tag, { item }).trim());
                 if (tagEl) {
                     tagEl.dataset.id = item.id;
                     fragment.appendChild(tagEl);
@@ -573,12 +561,11 @@
             t.trigger('render_items');
         }
 
-        openDropdown(delay = 300) {
+        openDropdown() {
             const t = this;
             if (t.state.isOpen) return;
             t.state.isOpen = true;
-            if (t._openTimeout) clearTimeout(t._openTimeout);
-            t._openTimeout = setTimeout(() => { t.list.style.display = 'block'; }, delay);
+            t.list.style.display = 'block';
             t.trigger('dropdown_open');
         }
 
@@ -586,7 +573,6 @@
             const t = this;
             if (!t.state.isOpen) return;
             t.state.isOpen = false;
-            if (t._openTimeout) clearTimeout(t._openTimeout);
             t.list.style.display = 'none';
             t._resetHoverItem();
             t.trigger('dropdown_close');
@@ -628,26 +614,14 @@
                 t._mutationObserver = null;
             }
 
-            // Xóa timeouts
-            if (t._openTimeout) {
-                clearTimeout(t._openTimeout);
-                t._openTimeout = null;
-            }
-
             // Xóa tất cả DOM event listeners
             t._offAllDOM();
 
             // Xóa DOM elements được tạo
-            if (t.container && t.container.parentNode) {
-                t.container.parentNode.removeChild(t.container);
-            }
+            if (t.container && t.container.parentNode) t.container.parentNode.removeChild(t.container);
 
-            // Khôi phục hiển thị của root element nếu đã ẩn
-            if (t.root) {
-                t.root.style.display = '';
-                // Xóa reference SmartList từ root element
-                delete t.root.SmartList;
-            }
+            // Xóa reference SmartList từ root element
+            delete t.root.SmartList;
 
             // Xóa tất cả event callbacks
             t._events = {};
